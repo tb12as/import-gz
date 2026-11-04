@@ -32,6 +32,7 @@ importgz config [-show | -clear]
 | `-y`            | Skips the confirmation prompt of `-fresh`.                          |
 | `-q`            | Hides the progress bar.                                             |
 | `-mysql <bin>`  | Sets the client binary. The default is `mysql`.                     |
+| `-parallel <n>` | Loads tables in `n` concurrent sessions (2 or more). Off by default. |
 | `-version`      | Prints the version and exits.                                       |
 | `-tz <mode>`    | Sets the time zone handling: `auto` (default), `keep`, or an offset. |
 
@@ -101,6 +102,32 @@ When the session is not interactive, a missing database name is derived from the
 - Colors are disabled when standard error is not a terminal or when `NO_COLOR` is set.
 - The file and the gzip header are validated before any database is dropped or created.
 - Ctrl+C stops the import and exits with status 130.
+
+## Parallel import
+
+`-parallel <n>` loads the tables of a dump in up to `n` concurrent `mysql` sessions. The value must be 2 or
+more; without the flag, the dump is imported in a single session.
+
+The import runs in four steps:
+
+1. The dump is read once to locate the header, the table definitions, the data of each table, and the
+   trailing section with views, routines, and events.
+2. One session creates all tables, in dump order.
+3. Up to `n` sessions load the table data concurrently. Each session receives the dump header first, so
+   settings such as `SET NAMES`, `time_zone`, and `sql_mode` apply in every session. A table's triggers are
+   created by the session that loads its data, after the rows.
+4. One session runs the trailing section, after all data is loaded.
+
+The unit of work is a table. A dump in which one table holds most of the data gains little, and the gain also
+depends on the server: with default InnoDB settings (a 128 MiB buffer pool and a 100 MiB redo log), the server
+becomes the bottleneck before the client does. Each session decompresses the dump separately, which costs CPU
+time but no disk space.
+
+The dump is imported serially, with a notice, when it cannot be split safely: when no tables are found, when
+the header contains statements that cannot run once per session (for example `DROP DATABASE` from
+`mysqldump --add-drop-database`), or when the header or the table definitions exceed the in-memory limits
+(1 MiB and 64 MiB). The split is line based and supports dumps from `mysqldump` and Adminer, which escape line
+breaks inside string values.
 
 ## Time zone correction
 

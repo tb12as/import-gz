@@ -25,7 +25,7 @@ func (c *counter) Read(p []byte) (int, error) {
 type bar struct {
 	mu    sync.Mutex
 	w     io.Writer
-	n     *counter
+	n     *atomic.Int64 // bytes done
 	size  int64
 	start time.Time
 	label string
@@ -38,7 +38,7 @@ func (b *bar) draw() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	done := b.n.n.Load()
+	done := b.n.Load()
 	pct := 1.0
 	if b.size > 0 {
 		pct = min(float64(done)/float64(b.size), 1)

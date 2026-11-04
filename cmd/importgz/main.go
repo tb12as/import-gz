@@ -104,6 +104,7 @@ func run(args []string) int {
 	yes := fs.Bool("y", false, "do not ask for confirmation with -fresh")
 	quiet := fs.Bool("q", false, "do not show the progress bar")
 	bin := fs.String("mysql", "mysql", "mysql client binary")
+	parallel := fs.Int("parallel", 0, "load tables in this many concurrent mysql sessions (2 or more; off by default)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	tzMode := fs.String("tz", "auto", "time_zone for TIMESTAMP values: auto (fix local-time values in a dump\n"+
 		"labelled UTC), keep (use the dump header), or an offset such as +07:00")
@@ -146,6 +147,11 @@ func run(args []string) int {
 
 	if *tzMode != "auto" && *tzMode != "keep" && !importer.ValidTZ(*tzMode) {
 		fail("invalid -tz %q; use auto, keep, SYSTEM or an offset such as +07:00", *tzMode)
+		return 2
+	}
+
+	if *parallel != 0 && *parallel < 2 {
+		fail("-parallel must be 2 or more")
 		return 2
 	}
 
@@ -292,7 +298,11 @@ func run(args []string) int {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Importing %s (%s) into %s\n", file, importer.HumanBytes(st.Size()), p.paint("1", db))
+	using := ""
+	if *parallel > 0 {
+		using = fmt.Sprintf(" using up to %d sessions", *parallel)
+	}
+	fmt.Fprintf(os.Stderr, "Importing %s (%s) into %s%s\n", file, importer.HumanBytes(st.Size()), p.paint("1", db), using)
 
 	res, err := importer.Run(ctx, importer.Options{
 		File:     file,
@@ -303,6 +313,7 @@ func run(args []string) int {
 		Fresh:    *fresh,
 		TimeZone: tz,
 		Progress: progress,
+		Parallel: *parallel,
 		Stdout:   os.Stdout,
 		Stderr:   os.Stderr,
 	})

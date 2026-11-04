@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +36,7 @@ type Options struct {
 	Fresh    bool     // drop and recreate database
 	TimeZone string   // if set, session time_zone for the import (overrides the dump header)
 	Progress bool     // draw progress bar on Stderr
+	Parallel int      // >= 2: load tables in this many concurrent sessions
 	Stdout   io.Writer
 	Stderr   io.Writer
 }
@@ -77,15 +79,28 @@ func openStream(path, tz string) (*stream, error) {
 		return nil, err
 	}
 
-	pre := prefix
 	var body io.Reader = d.body
 	if tz != "" {
-		pre += "SET time_zone = '" + tz + "';\n"
-		h := tzRe.ReplaceAll(header(d.body), []byte("${1}'"+tz+"'"))
-		body = io.MultiReader(bytes.NewReader(h), d.body)
+		body = io.MultiReader(bytes.NewReader(rewriteHeader(header(d.body), tz)), d.body)
 	}
 
-	return &stream{io.MultiReader(strings.NewReader(pre), body, strings.NewReader(suffix)), d}, nil
+	return &stream{io.MultiReader(strings.NewReader(sessionPrefix(tz)), body, strings.NewReader(suffix)), d}, nil
+}
+
+// sessionPrefix is sent before the dump in every mysql session.
+func sessionPrefix(tz string) string {
+	if tz == "" {
+		return prefix
+	}
+	return prefix + "SET time_zone = '" + tz + "';\n"
+}
+
+// rewriteHeader points every time_zone assignment in a dump header at tz.
+func rewriteHeader(h []byte, tz string) []byte {
+	if tz == "" {
+		return h
+	}
+	return tzRe.ReplaceAll(h, []byte("${1}'"+tz+"'"))
 }
 
 func openDump(path string) (*dump, error) {
@@ -143,6 +158,22 @@ func Run(ctx context.Context, o Options) (Result, error) {
 	}
 	defer s.Close()
 
+	// index before touching the database too: a corrupt dump must fail before a drop
+	var p *plan
+	if o.Parallel >= 2 {
+		var w io.Writer
+		if o.Progress {
+			w = o.Stderr
+		}
+		if p, err = index(ctx, o.File, w); err != nil {
+			return Result{}, fmt.Errorf("index dump: %w", err)
+		}
+		if p.serial != "" {
+			fmt.Fprintf(o.Stderr, "Parallel import is not possible: %s. Importing serially.\n", p.serial)
+			p = nil
+		}
+	}
+
 	q := quoteIdent(o.DB)
 	switch {
 	case o.Fresh:
@@ -156,20 +187,33 @@ func Run(ctx context.Context, o Options) (Result, error) {
 
 	start := time.Now()
 	stderr := o.Stderr
+	n, size := &s.n.n, s.size
+	var done atomic.Int64
+	if p != nil {
+		n, size = &done, p.total()
+	}
+
 	var stop func()
 	if o.Progress {
-		b := &bar{w: o.Stderr, n: s.n, size: s.size, start: start}
+		b := &bar{w: o.Stderr, n: n, size: size, start: start}
 		stderr = b
 		stop = b.start200ms()
 	}
 
 	// --database= instead of a positional arg so names starting with "-" are safe
-	err = o.mysql(ctx, s, stderr, "--database="+o.DB)
+	if p != nil {
+		err = runParallel(ctx, o, p, stderr, &done)
+	} else {
+		err = o.mysql(ctx, s, stderr, "--database="+o.DB)
+	}
 	if stop != nil {
 		stop()
 	}
 
 	r := Result{Bytes: s.n.n.Load(), Elapsed: time.Since(start)}
+	if p != nil {
+		r.Bytes = s.size
+	}
 	if err != nil {
 		return r, fmt.Errorf("import into %s failed: %w", o.DB, err)
 	}

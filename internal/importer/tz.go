@@ -69,7 +69,7 @@ func DetectLocalTZ(ctx context.Context, path string, off time.Duration, progress
 	}
 
 	if progress != nil {
-		b := &bar{w: progress, n: d.n, size: d.size, start: time.Now(), label: "checking timestamps "}
+		b := &bar{w: progress, n: &d.n.n, size: d.size, start: time.Now(), label: "checking timestamps "}
 		defer b.start200ms()()
 	}
 
