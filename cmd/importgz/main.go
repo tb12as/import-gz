@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
@@ -74,6 +76,15 @@ func promptErr(err error, fail func(string, ...any)) int {
 	return 1
 }
 
+// version comes from the build info: the module version for go install @vX, the git tag (or a
+// pseudo-version) for go build in a checkout, "(devel)" when built without vcs info
+func version() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return "(devel)"
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -93,6 +104,7 @@ func run(args []string) int {
 	yes := fs.Bool("y", false, "do not ask for confirmation with -fresh")
 	quiet := fs.Bool("q", false, "do not show the progress bar")
 	bin := fs.String("mysql", "mysql", "mysql client binary")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	tzMode := fs.String("tz", "auto", "time_zone for TIMESTAMP values: auto (fix local-time values in a dump\n"+
 		"labelled UTC), keep (use the dump header), or an offset such as +07:00")
 	fs.Usage = func() {
@@ -120,6 +132,11 @@ func run(args []string) int {
 		}
 		pos = append(pos, args[0])
 		args = args[1:]
+	}
+
+	if *showVersion {
+		fmt.Printf("importgz %s (%s, %s/%s)\n", version(), runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		return 0
 	}
 
 	p := painter(isTTY(os.Stderr) && os.Getenv("NO_COLOR") == "")

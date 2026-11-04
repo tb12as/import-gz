@@ -32,6 +32,7 @@ importgz config [-show | -clear]
 | `-y`            | Skips the confirmation prompt of `-fresh`.                          |
 | `-q`            | Hides the progress bar.                                             |
 | `-mysql <bin>`  | Sets the client binary. The default is `mysql`.                     |
+| `-version`      | Prints the version and exits.                                       |
 | `-tz <mode>`    | Sets the time zone handling: `auto` (default), `keep`, or an offset. |
 
 Flags may appear before, between, or after the positional arguments. All arguments after `--` are passed to
