@@ -71,7 +71,13 @@ func TestIndexMysqldump(t *testing.T) {
 		if len(p.data) != 3 {
 			t.Fatalf("%s: %d data ranges, want 3", file, len(p.data))
 		}
+		if p.tables != 3 {
+			t.Errorf("%s: %d tables, want 3", file, p.tables)
+		}
 		for i, tbl := range []string{"audit", "child", "parent"} {
+			if p.data[i].name != tbl {
+				t.Errorf("%s: range %d name %q, want %q", file, i, p.data[i].name, tbl)
+			}
 			d := raw[p.data[i].start:p.data[i].end]
 			if strings.Count(d, "INSERT INTO `") != 1 || !strings.Contains(d, "INSERT INTO `"+tbl+"`") {
 				t.Errorf("%s: range %d is not %s's data:\n%s", file, i, tbl, d)
@@ -110,6 +116,9 @@ func TestIndexAdminer(t *testing.T) {
 
 	if len(pl.data) != 2 {
 		t.Fatalf("%d data ranges, want 2", len(pl.data))
+	}
+	if pl.tables != 3 || pl.data[0].name != "a" || pl.data[1].name != "b" {
+		t.Errorf("tables %d, names %q %q", pl.tables, pl.data[0].name, pl.data[1].name)
 	}
 	a, b := raw[pl.data[0].start:pl.data[0].end], raw[pl.data[1].start:pl.data[1].end]
 	if !strings.HasPrefix(a, "TRUNCATE `a`") || !strings.Contains(a, "(2);") || !strings.Contains(a, "a_bi") {
@@ -214,4 +223,17 @@ func gzBytes(t *testing.T, s string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func TestTableName(t *testing.T) {
+	for line, want := range map[string]string{
+		"CREATE TABLE `users` (\n":              "users",
+		"CREATE TABLE IF NOT EXISTS `a``b` (":   "a`b",
+		"create table if not exists orders(id)": "orders",
+		"CREATE TABLE plain (\n":                "plain",
+	} {
+		if got := tableName([]byte(line)); got != want {
+			t.Errorf("tableName(%q) = %q, want %q", line, got, want)
+		}
+	}
 }

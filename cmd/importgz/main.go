@@ -336,9 +336,17 @@ func run(args []string) int {
 		return 1
 	}
 
+	tables := ""
+	if res.Tables > 0 {
+		tables = fmt.Sprintf(", %d tables", res.Tables)
+	}
+	if res.Tables == 1 {
+		tables = ", 1 table"
+	}
+
 	rate := float64(res.Bytes) / max(res.Elapsed.Seconds(), 1e-9)
-	fmt.Fprintf(os.Stderr, "%s %s into %s in %s (%s, %s/s)\n",
+	fmt.Fprintf(os.Stderr, "%s %s into %s in %s (%s, %s/s%s)\n",
 		p.paint("44", " Imported "), file, p.paint("42", " "+db+" "), fmtDur(res.Elapsed),
-		importer.HumanBytes(res.Bytes), importer.HumanBytes(int64(rate)))
+		importer.HumanBytes(res.Bytes), importer.HumanBytes(int64(rate)), tables)
 	return 0
 }

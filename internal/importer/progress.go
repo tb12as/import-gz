@@ -29,6 +29,7 @@ type bar struct {
 	size  int64
 	start time.Time
 	label string
+	cur   *atomic.Pointer[string] // optional text after the ETA, e.g. the table being loaded
 	shown bool
 }
 
@@ -50,10 +51,19 @@ func (b *bar) draw() {
 		eta = time.Duration(float64(b.size-done) / rate * float64(time.Second)).Round(time.Second).String()
 	}
 
+	// truncated so the line never wraps, which would break the \r redraw
+	var tail string
+	if b.cur != nil {
+		if s := b.cur.Load(); s != nil {
+			r := []rune(*s)
+			tail = "  " + string(r[:min(len(r), 40)])
+		}
+	}
+
 	fill := int(pct * barWidth)
-	fmt.Fprintf(b.w, "\r\033[K%s[%s%s] %3.0f%%  %s / %s  %s/s  ETA %s", b.label,
+	fmt.Fprintf(b.w, "\r\033[K%s[%s%s] %3.0f%%  %s / %s  %s/s  ETA %s%s", b.label,
 		strings.Repeat("=", fill), strings.Repeat(" ", barWidth-fill), pct*100,
-		HumanBytes(done), HumanBytes(b.size), HumanBytes(int64(rate)), eta)
+		HumanBytes(done), HumanBytes(b.size), HumanBytes(int64(rate)), eta, tail)
 	b.shown = true
 }
 
