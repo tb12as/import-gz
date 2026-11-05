@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 )
 
 const body = "CREATE TABLE t (id int);\nINSERT INTO t VALUES (1);"
@@ -145,5 +147,37 @@ func TestHumanBytes(t *testing.T) {
 		if got := HumanBytes(in); got != want {
 			t.Errorf("HumanBytes(%d) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestTableScan(t *testing.T) {
+	f, err := os.Open("testdata/mysqldump.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// one byte per read splits every line and name across reads
+	var cur atomic.Pointer[string]
+	ts := &tableScan{r: iotest.OneByteReader(f), cur: &cur}
+
+	var seen []string
+	buf := make([]byte, 1)
+	for {
+		_, err := ts.Read(buf)
+		if s := cur.Load(); s != nil && (len(seen) == 0 || seen[len(seen)-1] != *s) {
+			seen = append(seen, *s)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// the dump also holds 'CREATE TABLE fake;' inside a string, which must not count
+	if got := strings.Join(seen, ","); got != "audit,child,parent" || ts.n != 3 {
+		t.Errorf("seen %q, n %d", got, ts.n)
 	}
 }

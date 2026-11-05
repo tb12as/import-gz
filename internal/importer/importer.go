@@ -43,6 +43,7 @@ type Options struct {
 
 type Result struct {
 	Bytes   int64 // bytes read from the dump file
+	Tables  int   // CREATE TABLE statements sent
 	Elapsed time.Duration
 }
 
@@ -85,6 +86,54 @@ func openStream(path, tz string) (*stream, error) {
 	}
 
 	return &stream{io.MultiReader(strings.NewReader(sessionPrefix(tz)), body, strings.NewReader(suffix)), d}, nil
+}
+
+const headMax = 256 // enough for CREATE TABLE plus a 64-char name, even fully escaped
+
+// tableScan passes a stream through and records each table it creates.
+type tableScan struct {
+	r    io.Reader
+	cur  *atomic.Pointer[string]
+	n    int
+	head []byte // start of the current line, up to headMax bytes
+	done bool   // head has been checked for this line
+}
+
+func (t *tableScan) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+
+	for b := p[:n]; len(b) > 0; {
+		seg := b
+		i := bytes.IndexByte(b, '\n')
+		if i >= 0 {
+			seg, b = b[:i], b[i+1:]
+		} else {
+			b = nil
+		}
+
+		if !t.done {
+			t.head = append(t.head, seg[:min(len(seg), headMax-len(t.head))]...)
+			if i >= 0 || len(t.head) == headMax {
+				t.check()
+				t.done = true
+			}
+		}
+		if i >= 0 {
+			t.head, t.done = t.head[:0], false
+		}
+	}
+	return n, err
+}
+
+func (t *tableScan) check() {
+	const m = "CREATE TABLE "
+	if len(t.head) < len(m) || !bytes.EqualFold(t.head[:len(m)], []byte(m)) {
+		return
+	}
+
+	s := tableName(t.head)
+	t.n++
+	t.cur.Store(&s)
 }
 
 // sessionPrefix is sent before the dump in every mysql session.
@@ -189,30 +238,33 @@ func Run(ctx context.Context, o Options) (Result, error) {
 	stderr := o.Stderr
 	n, size := &s.n.n, s.size
 	var done atomic.Int64
+	var cur atomic.Pointer[string]
 	if p != nil {
 		n, size = &done, p.total()
 	}
 
 	var stop func()
 	if o.Progress {
-		b := &bar{w: o.Stderr, n: n, size: size, start: start}
+		b := &bar{w: o.Stderr, n: n, size: size, start: start, cur: &cur}
 		stderr = b
 		stop = b.start200ms()
 	}
 
 	// --database= instead of a positional arg so names starting with "-" are safe
+	ts := &tableScan{r: s, cur: &cur}
 	if p != nil {
-		err = runParallel(ctx, o, p, stderr, &done)
+		err = runParallel(ctx, o, p, stderr, &done, &cur)
 	} else {
-		err = o.mysql(ctx, s, stderr, "--database="+o.DB)
+		err = o.mysql(ctx, ts, stderr, "--database="+o.DB)
 	}
 	if stop != nil {
 		stop()
 	}
 
-	r := Result{Bytes: s.n.n.Load(), Elapsed: time.Since(start)}
+	// ts.n is safe to read: cmd.Run waits for the goroutine copying stdin
+	r := Result{Bytes: s.n.n.Load(), Tables: ts.n, Elapsed: time.Since(start)}
 	if p != nil {
-		r.Bytes = s.size
+		r.Bytes, r.Tables = s.size, p.tables
 	}
 	if err != nil {
 		return r, fmt.Errorf("import into %s failed: %w", o.DB, err)

@@ -28,7 +28,10 @@ var (
 		`\s+(/\*!\d+\s*)?(VIEW|PROCEDURE|FUNCTION|EVENT)\b`)
 )
 
-type rng struct{ start, end int64 }
+type rng struct {
+	start, end int64
+	name       string // table the range loads
+}
 
 // plan splits a dump into what each phase of a parallel import runs.
 type plan struct {
@@ -38,12 +41,44 @@ type plan struct {
 	tail   int64  // offset of views/routines/events run last, -1 if none
 	size   int64  // decompressed dump size
 	serial string // non-empty: why the dump cannot be split
+	tables int    // CREATE TABLE statements seen
 }
 
 type unit struct {
 	created bool  // saw CREATE TABLE
 	inData  bool  // past the first data statement
 	data    int64 // offset of the first data statement
+	name    string
+}
+
+// tableName returns the table a "CREATE TABLE ..." line creates.
+func tableName(line []byte) string {
+	s := line[len("CREATE TABLE "):]
+	if len(s) >= 14 && bytes.EqualFold(s[:14], []byte("IF NOT EXISTS ")) {
+		s = s[14:]
+	}
+
+	if len(s) == 0 || s[0] != '`' {
+		if i := bytes.IndexAny(s, " (\r\n"); i >= 0 {
+			s = s[:i]
+		}
+		return string(s)
+	}
+
+	var b []byte
+	for i := 1; i < len(s); i++ {
+		if s[i] != '`' {
+			b = append(b, s[i])
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '`' {
+			b = append(b, '`')
+			i++
+			continue
+		}
+		break
+	}
+	return string(b)
 }
 
 func upperPrefix(line []byte) string {
@@ -122,7 +157,7 @@ func index(ctx context.Context, path string, progress io.Writer) (*plan, error) 
 
 	closeUnit := func(end int64) {
 		if cur != nil && cur.inData && end > cur.data {
-			p.data = append(p.data, rng{cur.data, end})
+			p.data = append(p.data, rng{cur.data, end, cur.name})
 		}
 	}
 
@@ -156,7 +191,8 @@ func index(ctx context.Context, path string, progress io.Writer) (*plan, error) 
 					cur = &unit{}
 				}
 				if strings.HasPrefix(u, "CREATE TABLE ") {
-					cur.created = true
+					cur.created, cur.name = true, tableName(line)
+					p.tables++
 				}
 				dest = &p.ddl
 			case isTail(u, cur) && cur != nil:
@@ -275,9 +311,12 @@ func (o Options) feed(ctx context.Context, head string, next func() (rng, bool),
 
 // runParallel imports a split dump: table definitions, then per-table data in o.Parallel sessions,
 // then the tail. shortcut: the unit of work is a table, so one huge table still loads in one session.
-func runParallel(ctx context.Context, o Options, p *plan, stderr io.Writer, done *atomic.Int64) error {
+func runParallel(ctx context.Context, o Options, p *plan, stderr io.Writer, done *atomic.Int64,
+	cur *atomic.Pointer[string]) error {
+	set := func(s string) { cur.Store(&s) }
 	head := sessionPrefix(o.TimeZone) + string(rewriteHeader(p.header, o.TimeZone))
 
+	set("creating tables")
 	ddl := io.MultiReader(strings.NewReader(head), bytes.NewReader(p.ddl), strings.NewReader(suffix))
 	if err := o.mysql(ctx, ddl, stderr, "--database="+o.DB); err != nil {
 		return fmt.Errorf("create tables: %w", err)
@@ -296,6 +335,7 @@ func runParallel(ctx context.Context, o Options, p *plan, stderr io.Writer, done
 			return rng{}, false
 		}
 		i++
+		set(fmt.Sprintf("%d/%d %s", i, len(p.data), p.data[i-1].name))
 		return p.data[i-1], true
 	}
 
@@ -323,7 +363,8 @@ func runParallel(ctx context.Context, o Options, p *plan, stderr io.Writer, done
 	if p.tail < 0 {
 		return nil
 	}
-	tail := []rng{{p.tail, p.size}}
+	set("views and routines")
+	tail := []rng{{p.tail, p.size, ""}}
 	return o.feed(ctx, head, func() (rng, bool) {
 		if len(tail) == 0 {
 			return rng{}, false
